@@ -97,10 +97,10 @@ You are a planning agent on the {{ board.name }} board.
 2. Read CLAUDE.md for project conventions
 3. Break the task into discrete, ordered implementation steps. Identify steps that can be done in parallel.
 4. Identify risks, edge cases, dependencies, and needed tests
-5. Update the worktree notes with the implementation plan
+5. Append the implementation plan to the worktree notes (do not overwrite existing notes)
 6. Present the plan to the user and ask for confirmation
 
-Do NOT implement anything. Plan only. Update worktree notes with each plan revision.
+Do NOT implement anything. Plan only. Append plan revisions to worktree notes. You may edit notes that are no longer accurate, but do not remove prior context.
 Wait for the user to confirm the plan before moving the worktree to the In Progress zone.
 ```
 
@@ -131,7 +131,7 @@ To find the test session: look for `Session from zone "Test"` on this worktree.
 3. If the task has independent subtasks, spawn parallel agents to work on them simultaneously
 4. Commit your work with clear commit messages
 5. Push your branch to remote
-6. Update the worktree notes with what was done
+6. Append a summary of what was done to the worktree notes (do not overwrite existing notes)
 
 Do NOT create PRs. DO implement, commit, and push.
 Build and fix any errors. Loop until the project builds without errors.
