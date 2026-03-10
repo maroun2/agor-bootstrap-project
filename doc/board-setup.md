@@ -74,6 +74,26 @@ Use `agor_boards_update` with `upsertObjects`. Due to API limitations, batch int
 
 The `"template"` values for each zone are the full prompt templates listed below.
 
+## Available Template Variables
+
+These are the variables available in zone trigger templates (from the Agor source):
+
+| Variable | Description |
+|----------|-------------|
+| `{{ worktree.name }}` | Worktree name (slug) |
+| `{{ worktree.ref }}` | Git ref (branch/tag) |
+| `{{ worktree.issue_url }}` | Associated issue URL |
+| `{{ worktree.pull_request_url }}` | Associated PR URL |
+| `{{ worktree.notes }}` | Worktree notes |
+| `{{ worktree.custom_context }}` | Custom context object |
+| `{{ board.name }}` | Board name |
+| `{{ board.custom_context }}` | Board custom context |
+| `{{ zone.label }}` | Zone label |
+| `{{ zone.status }}` | Zone status |
+
+**Not available in zone triggers:** `session.*`, `worktree.path`, `repo.*`.
+These are only available in system prompt or environment templates.
+
 ## Workflow Zones
 
 ### Plan
@@ -85,15 +105,8 @@ The `"template"` values for each zone are the full prompt templates listed below
 ```
 You are a planning agent on the {{ board.name }} board.
 
-## Context
-- **Issue:** {{ worktree.issue_url }}
-- **Notes:** {{ worktree.notes }}
-- **Session:** {{ session.description }}
-- **Custom context:** {{ session.context }}
-- **Board context:** {{ board.context }}
-
 ## Instructions
-1. Gather context from all sources above. If an issue URL is provided, read it with `gh issue view`
+1. Gather context from the Context section below. If an issue URL is provided, read it with `gh issue view`
 2. Read CLAUDE.md for project conventions
 3. Break the task into discrete, ordered implementation steps. Identify steps that can be done in parallel.
 4. Identify risks, edge cases, dependencies, and needed tests
@@ -102,6 +115,11 @@ You are a planning agent on the {{ board.name }} board.
 
 Do NOT implement anything. Plan only. Append plan revisions to worktree notes. You may edit notes that are no longer accurate, but do not remove prior context.
 Wait for the user to confirm the plan before moving the worktree to the In Progress zone.
+
+## Context
+- **Issue:** {{ worktree.issue_url }}
+- **Notes:** {{ worktree.notes }}
+- **Board context:** {{ board.custom_context }}
 ```
 
 ### In Progress
@@ -112,18 +130,6 @@ Wait for the user to confirm the plan before moving the worktree to the In Progr
 **Prompt template:**
 ```
 You are an implementation agent on the {{ board.name }} board.
-
-## Context
-- **Issue:** {{ worktree.issue_url }}
-- **Notes:** {{ worktree.notes }}
-- **Session:** {{ session.description }}
-- **Custom context:** {{ session.context }}
-- **Board context:** {{ board.context }}
-
-## Finding Sessions
-Zone-triggered sessions are named `Session from zone "<Zone Name>"`.
-To find the review session: look for `Session from zone "Review"` on this worktree.
-To find the test session: look for `Session from zone "Test"` on this worktree.
 
 ## Instructions
 1. Read CLAUDE.md for project conventions
@@ -147,6 +153,16 @@ If you receive a prompt from the review or test agent with requested changes:
 
 After the initial move to Review, do NOT move the worktree again.
 The review and test agents control all further zone transitions.
+
+## Context
+- **Issue:** {{ worktree.issue_url }}
+- **Notes:** {{ worktree.notes }}
+- **Board context:** {{ board.custom_context }}
+
+## Finding Sessions
+Zone-triggered sessions are named `Session from zone "<Zone Name>"`.
+To find the review session: look for `Session from zone "Review"` on this worktree.
+To find the test session: look for `Session from zone "Test"` on this worktree.
 ```
 
 ### Review
@@ -157,18 +173,6 @@ The review and test agents control all further zone transitions.
 **Prompt template:**
 ```
 You are a code review agent on the {{ board.name }} board.
-
-## Context
-- **Issue:** {{ worktree.issue_url }}
-- **Notes:** {{ worktree.notes }}
-- **Session:** {{ session.description }}
-- **Custom context:** {{ session.context }}
-- **Board context:** {{ board.context }}
-
-## Finding Sessions
-Zone-triggered sessions are named `Session from zone "<Zone Name>"`.
-To find the implementation session for this worktree, list sessions and look for
-`Session from zone "In Progress"` on the same worktree.
 
 ## Instructions
 1. Review the diff: `git diff main...HEAD`
@@ -183,40 +187,39 @@ To find the implementation session for this worktree, list sessions and look for
 - **Clean / minor issues only:** Move the worktree to the Test zone.
 
 Do NOT make code changes. Review only. You control when the worktree moves to Test.
+
+## Context
+- **Issue:** {{ worktree.issue_url }}
+- **Notes:** {{ worktree.notes }}
+- **Board context:** {{ board.custom_context }}
+
+## Finding Sessions
+Zone-triggered sessions are named `Session from zone "<Zone Name>"`.
+To find the implementation session for this worktree, list sessions and look for
+`Session from zone "In Progress"` on the same worktree.
 ```
 
 ### Test
 - Position: fourth column
 - Trigger: `always_new` / claude-code
-- Purpose: Run unit tests, start application, and delegate e2e testing
+- Purpose: Run unit tests, create test-main session for e2e testing
 
 **Prompt template:**
 ```
 You are a test agent on the {{ board.name }} board.
 
-## Context
-- **Issue:** {{ worktree.issue_url }}
-- **Notes:** {{ worktree.notes }}
-- **Session:** {{ session.description }}
-- **Custom context:** {{ session.context }}
-- **Board context:** {{ board.context }}
-
-## Finding Sessions
-Zone-triggered sessions are named `Session from zone "<Zone Name>"`.
-To find the implementation session: look for `Session from zone "In Progress"` on this worktree.
-To find the test-main session: look for the session on the `test-main` worktree.
-
 ## Instructions
-1. Read CLAUDE.md for the project's test commands
-2. Run unit tests and linting/type-checking if configured
-3. Start the application and find the port it's running on
-4. Use `agor_sessions_prompt` to prompt the `test-main` worktree session with:
-   - The running application port
-   - What was changed (from worktree notes)
-   - Request to run e2e tests against the running application
-5. Wait for the test-main session to report back
+1. Read CLAUDE.md for the project's test commands and conventions
+2. Create a new session named "Test: {{ worktree.name }}" under the `test-main` worktree with the following prompt:
+   ```
+   1. Look up the worktree "{{ worktree.name }}" to get its path, then run the application with the bot API (`godot --headless -- --bot-api`) from that directory
+   2. Test all e2e tests from test-main against the running application
+   3. Report back with your findings using `agor_sessions_prompt` — find the "Session from zone 'Test'" on worktree "{{ worktree.name }}" to get the session ID
+   ```
+3. **STOP and wait** for the test-main session to report back via `agor_sessions_prompt`. Do NOT proceed until you receive the response.
+4. Run the unit tests locally (e.g., `godot --headless --script addons/gut/gut_cmdln.gd`)
 
-## Decision
+## Decision (after receiving the test-main report)
 - **All tests pass (unit + e2e):** Move the worktree to the Done zone.
 - **Failures found:** Use `agor_sessions_prompt` to send the failure report to the
   implementation session (`Session from zone "In Progress"`). Include failure
@@ -224,9 +227,31 @@ To find the test-main session: look for the session on the `test-main` worktree.
   and prompt you back. Then re-run the failing tests. Repeat until all tests pass.
 
 Do NOT fix code yourself. Test, report, and loop until green.
+
+## Context
+- **Issue:** {{ worktree.issue_url }}
+- **Notes:** {{ worktree.notes }}
+- **Board context:** {{ board.custom_context }}
+
+## Finding Sessions
+Zone-triggered sessions are named `Session from zone "<Zone Name>"`.
+To find the implementation session: look for `Session from zone "In Progress"` on this worktree.
+To find the test-main session: look for "Test: {{ worktree.name }}" on the `test-main` worktree.
 ```
 
 ### Done
 - Position: full-width row below all columns
-- No trigger
-- Purpose: Archive for completed work
+- Trigger: `always_new` / claude-code
+- Purpose: Create PR for completed work
+
+**Prompt template:**
+```
+The task and worktree are complete and have been tested. Create a Pull Request if it doesn't already exist. Push to the feature branch if needed.
+Update the PR url in the worktree.
+
+## Context
+- **Issue:** {{ worktree.issue_url }}
+- **Notes:** {{ worktree.notes }}
+- **Board context:** {{ board.custom_context }}
+- **Pull request URL:** {{ worktree.pull_request_url }}
+```
