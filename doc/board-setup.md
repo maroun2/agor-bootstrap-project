@@ -269,7 +269,7 @@ You are a test agent on the {{ board.name }} board.
 4. Run the unit tests locally (e.g., `godot --headless --script addons/gut/gut_cmdln.gd`)
 
 ## Decision (after receiving the test-main report)
-- **All tests pass (unit + e2e):** Move the worktree to the Done zone.
+- **All tests pass (unit + e2e):** Move the worktree to the Done zone, but NEVER move the worktree before report from test-main e2e testing.
 - **Failures found:** Use `agor_sessions_prompt` to send the failure report to the
   implementation session (`Session from zone "In Progress"`). Include failure
   details and what needs to be fixed. Wait for the implementation agent to fix
