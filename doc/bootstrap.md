@@ -27,6 +27,30 @@ Read `doc/board-setup.md` and set up the board:
 - [ ] Check if a `coordinator` worktree already exists on the board
 - [ ] If it does NOT exist: create it, place it outside/above the zones
 - [ ] If it already exists: skip creation, continue with the existing one
+- [ ] Set the coordinator worktree notes with the workflow description:
+
+```
+## Workflow
+
+Worktrees flow through board zones: **Plan > In Progress > Review > Test > Done**
+
+- **Plan**: Agent creates implementation plan, waits for user confirmation
+- **In Progress**: Agent implements, commits, pushes, then moves to Review
+- **Review**: Agent reviews diff + AC, sends feedback to implementation or moves to Test
+- **Test**: Agent creates session on `test-main` to run e2e tests, runs unit tests locally, waits for report
+- **Done**: Agent creates PR if needed
+
+Cross-agent communication uses `agor_sessions_prompt`. Sessions are named Session from zone "Zone Name" for discovery.
+
+## Feature Worktrees
+
+Keep this table updated as worktrees are created and move through zones.
+
+| Worktree | Zone | Status | Branch |
+|----------|------|--------|--------|
+```
+
+- [ ] Add `Always read worktree notes for context and instructions.` as the first line of CLAUDE.md
 
 ### Step 1: Roadmap
 Read `doc/create-roadmap.md` and follow it completely:

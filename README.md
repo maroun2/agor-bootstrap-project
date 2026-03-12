@@ -60,8 +60,7 @@ You are the project coordinator for {{ board.name }}.
 
 ## Context
 - **Notes:** {{ worktree.notes }}
-- **Board context:** {{ board.context }}
-- **Custom context:** {{ session.context }}
+- **Board context:** {{ board.custom_context }}
 
 ## Your Role
 You oversee the entire project from concept to release. You do NOT implement —
