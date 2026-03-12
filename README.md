@@ -4,6 +4,8 @@ A reusable template for setting up a [dark factory](https://simonwillison.net/20
 
 Inspired by the [five levels of AI-assisted programming](https://hackernoon.com/the-dark-factory-pattern-moving-from-ai-assisted-to-fully-autonomous-coding): from spicy autocomplete (L1) to the dark factory (L5) where specs go in and software comes out. This template sets up the coordinator, workflow zones, and agent prompts to get there.
 
+![Agor board with workflow zones](screenshot.jpeg)
+
 ## Features
 
 - **Isolated test agent** — the test agent lives in its own worktree with no access to implementation code, testing purely against the API specification. This ensures tests validate behavior, not implementation details
