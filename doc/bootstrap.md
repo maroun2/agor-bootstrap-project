@@ -11,6 +11,7 @@ Check which steps have already been completed. Look for these artifacts:
 - [ ] `CLAUDE.md` references `roadmap.md`
 - [ ] `api.md` exists in the repo
 - [ ] `CLAUDE.md` references `api.md`
+- [ ] Designer agent asked about / set up (optional)
 - [ ] Test agent worktree exists and is placed outside zones
 - [ ] Phase 1 worktrees are created and placed in Plan zone
 
@@ -43,13 +44,19 @@ Read `doc/create-api-doc.md` and follow it completely:
 - [ ] Interactive review with the user
 - [ ] Save `api.md`, update `CLAUDE.md`, commit and merge to main
 
-### Step 3: Test Agent
+### Step 3: Designer Agent (Optional)
+Read `doc/create-designer.md` and follow it completely:
+- [ ] Ask the user if the project needs graphic asset generation
+- [ ] If yes: set up image generation service, create designer worktree
+- [ ] If no: skip and continue
+
+### Step 4: Test Agent
 Read `doc/create-tests.md` and follow it completely:
 - [ ] Create test agent worktree
 - [ ] Run it through Plan -> In Progress -> Review
 - [ ] Place it outside zones as permanent test agent
 
-### Step 4: Phase 1 Tasks
+### Step 5: Phase 1 Tasks
 Read `doc/create-phase1.md` and follow it completely:
 - [ ] Create worktrees for all Phase 1 tasks from the roadmap
 - [ ] Set detailed notes on each with acceptance criteria
