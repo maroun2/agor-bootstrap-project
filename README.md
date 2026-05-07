@@ -102,7 +102,7 @@ Reusable skills bundled in `.claude/skills/`. These are automatically discovered
 
 | Skill | Description |
 |-------|-------------|
-| [`board-context`](.claude/skills/board-context/SKILL.md) | Generate a deterministic Markdown board context snapshot with MCP drill-down pointers |
+| [`agor-board-context`](.claude/skills/agor-board-context/SKILL.md) | Generate a deterministic Markdown board context snapshot with MCP drill-down pointers |
 | [`agor-bg`](.claude/skills/agor-bg/SKILL.md) | Run long-running commands in background with session notification |
 | [`agor-board-setup`](.claude/skills/agor-board-setup/SKILL.md) | Set up a board with workflow zones (Plan, In Progress, Review, Test, Done) |
 | [`agor-mcp-add`](.claude/skills/agor-mcp-add/SKILL.md) | Add MCP servers to Agor's database configuration |
@@ -112,7 +112,7 @@ Reusable skills bundled in `.claude/skills/`. These are automatically discovered
 
 Deterministic Markdown board context snapshot tool. Queries `~/.agor/agor.db` directly — no MCP, no LLM, no network calls.
 
-Lives in `.claude/skills/board-context/` following the standard Agor skill layout (`SKILL.md` + `scripts/`). Legacy `board-context` wrapper included for backward compatibility.
+Lives in `.claude/skills/agor-board-context/` following the standard Agor skill layout (`SKILL.md` + `scripts/`). Legacy `board-context` wrapper included for backward compatibility.
 
 ### Requirements
 
