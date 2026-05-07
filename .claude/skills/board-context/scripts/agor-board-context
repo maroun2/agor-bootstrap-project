@@ -5,7 +5,7 @@ set -euo pipefail
 # Queries ~/.agor/agor.db directly. No MCP, LLM, or network dependency.
 # PR detection uses gh CLI when available (best-effort, optional).
 
-VERSION="0.6.0"
+VERSION="0.6.1"
 AGOR_DB="${AGOR_DB:-$HOME/.agor/agor.db}"
 _gh_pr_dir=""  # set in main() for parallel gh prefetch
 
@@ -524,13 +524,24 @@ generate_markdown() {
   fi
 
   # ── 3. Worktrees ───────────────────────────────────────────────────────────
+  local _has_rules
+  _has_rules=$(echo "$ctx" | jq '[.worktrees[] | select(.local_paths.rules_dir != null)] | length')
+
   printf '## Worktrees\n\n'
-  printf '| Name | Repo | Branch | Zone | Sessions | Latest | Notes | Rules | wt_id |\n'
-  printf '|------|------|--------|------|----------|--------|-------|-------|-------|\n'
-  echo "$ctx" | jq -r '.worktrees[] |
-    (.sessions.latest.title // "—" | gsub("(\\n)+"; " ") | if length > 40 then .[:40] + "…" else . end) as $lt |
-    (.local_paths.rules_preview // "—") as $rp |
-    "| \(.name) | \(.repo_slug) | \(.ref) | \(.zone_label // "—") | \(.sessions.total) | \($lt) (\(.sessions.latest.status // "—")) | \(.notes_preview // "—") | \($rp) | \(.worktree_id) |"'
+  if [[ "$_has_rules" -gt 0 ]]; then
+    printf '| Name | Repo | Branch | Zone | Sessions | Latest | Notes | Rules | wt_id |\n'
+    printf '|------|------|--------|------|----------|--------|-------|-------|-------|\n'
+    echo "$ctx" | jq -r '.worktrees[] |
+      (.sessions.latest.title // "—" | gsub("(\\n)+"; " ") | if length > 40 then .[:40] + "…" else . end) as $lt |
+      (.local_paths.rules_preview // "—") as $rp |
+      "| \(.name) | \(.repo_slug) | \(.ref) | \(.zone_label // "—") | \(.sessions.total) | \($lt) (\(.sessions.latest.status // "—")) | \(.notes_preview // "—") | \($rp) | \(.worktree_id) |"'
+  else
+    printf '| Name | Repo | Branch | Zone | Sessions | Latest | Notes | wt_id |\n'
+    printf '|------|------|--------|------|----------|--------|-------|-------|\n'
+    echo "$ctx" | jq -r '.worktrees[] |
+      (.sessions.latest.title // "—" | gsub("(\\n)+"; " ") | if length > 40 then .[:40] + "…" else . end) as $lt |
+      "| \(.name) | \(.repo_slug) | \(.ref) | \(.zone_label // "—") | \(.sessions.total) | \($lt) (\(.sessions.latest.status // "—")) | \(.notes_preview // "—") | \(.worktree_id) |"'
+  fi
   printf '\n'
   printf '> `agor_worktrees_get(worktreeId="<wt_id>")`\n\n'
 
