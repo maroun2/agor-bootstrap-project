@@ -5,7 +5,7 @@ set -euo pipefail
 # Queries ~/.agor/agor.db directly. No MCP, LLM, or network dependency.
 # PR detection uses gh CLI when available (best-effort, optional).
 
-VERSION="0.6.1"
+VERSION="0.6.2"
 AGOR_DB="${AGOR_DB:-$HOME/.agor/agor.db}"
 _gh_pr_dir=""  # set in main() for parallel gh prefetch
 
@@ -313,17 +313,36 @@ discover_local_paths() {
       '. + {skills_dir: $p, skills_count: $n}')
   fi
 
-  if [[ -d "$wt_path/.claude/rules" ]]; then
+  # Rules: CLAUDE.md or AGENTS.md content preview (first meaningful line after title)
+  local _rules_file=""
+  [[ -f "$wt_path/CLAUDE.md"  ]] && _rules_file="$wt_path/CLAUDE.md"
+  [[ -z "$_rules_file" && -f "$wt_path/AGENTS.md" ]] && _rules_file="$wt_path/AGENTS.md"
+  if [[ -n "$_rules_file" ]]; then
+    local rpreview rline
+    rpreview=""
+    while IFS= read -r rline; do
+      # Skip headings and blank lines
+      [[ "$rline" =~ ^[[:space:]]*# ]] && continue
+      [[ -z "${rline// }" ]] && continue
+      rpreview="${rline#"${rline%%[! ]*}"}"  # ltrim
+      break
+    done < "$_rules_file"
+    [[ ${#rpreview} -gt 80 ]] && rpreview="${rpreview:0:80}…"
+    if [[ -n "$rpreview" ]]; then
+      result=$(echo "$result" | jq \
+        --arg  p "$_rules_file" \
+        --arg  rp "$rpreview" \
+        '. + {rules_dir: $p, rules_count: 1, rules_preview: $rp}')
+    fi
+  elif [[ -d "$wt_path/.claude/rules" ]]; then
     local n rpreview="" rline
     n=$(find "$wt_path/.claude/rules" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
-    # Collect first meaningful line from each rules file, join with " · "
     while IFS= read -r rf; do
       rline=$(grep -vE '^[[:space:]]*(#|$)' "$rf" 2>/dev/null | head -1 | sed 's/^[[:space:]]*//' || true)
       [[ -n "$rline" ]] || continue
       rpreview="${rpreview:+${rpreview} · }${rline}"
       [[ ${#rpreview} -ge 80 ]] && break
     done < <(find "$wt_path/.claude/rules" -maxdepth 1 -type f 2>/dev/null | sort)
-    # Truncate to 80 chars
     [[ ${#rpreview} -gt 80 ]] && rpreview="${rpreview:0:80}…"
     result=$(echo "$result" | jq \
       --arg  p "$wt_path/.claude/rules" \
