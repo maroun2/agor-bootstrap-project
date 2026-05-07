@@ -1,5 +1,5 @@
 ---
-name: board-context
+name: agor-board-context
 description: Generate a deterministic Markdown board context snapshot from an Agor board. Output to stdout. Covers zones (with trigger previews), worktrees (notes + rules previews, inline wt_id), key sessions (last-msg tail, inline sess_id), open PRs, project docs deduplicated by hash, and local context.
 triggers:
   - board context
@@ -18,7 +18,7 @@ triggers:
 argument-hint: "<board-slug-or-id>"
 ---
 
-# Board Context — Deterministic Agor Board Snapshot
+# agor-board-context — Deterministic Agor Board Snapshot
 
 Generate a compact Markdown snapshot of an Agor board for use as starter
 context in a new session. Output goes to stdout — pipe or redirect as needed.
@@ -28,11 +28,9 @@ detection via `gh` is best-effort and optional).
 ## Usage
 
 ```bash
-agor-board-context <board-slug-or-id>
-agor-board-context my-project > board-context.md
+.claude/skills/agor-board-context/scripts/agor-board-context <board-slug-or-id>
+.claude/skills/agor-board-context/scripts/agor-board-context my-project > board-context.md
 ```
-
-Script: `.claude/skills/board-context/scripts/agor-board-context`
 
 ## Requirements
 
