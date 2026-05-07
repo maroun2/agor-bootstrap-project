@@ -1,0 +1,689 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agor-board-context v0.5.0 — Markdown board context snapshot
+# Queries ~/.agor/agor.db directly. No MCP, LLM, or network dependency.
+# PR detection uses gh CLI when available (best-effort, optional).
+
+VERSION="0.6.0"
+AGOR_DB="${AGOR_DB:-$HOME/.agor/agor.db}"
+_gh_pr_dir=""  # set in main() for parallel gh prefetch
+
+die() { echo "error: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Usage: agor-board-context <board-slug-or-id>
+
+Produce a Markdown board context snapshot from Agor's local database.
+Output goes to stdout — pipe or redirect as needed.
+
+Includes: board overview, zones (with template previews), worktrees
+(with notes/rules previews), key sessions (with last-message tail),
+open PRs, project docs (deduplicated by hash), and local paths.
+Inline tool-call IDs on each row.
+
+Options:
+  -h, --help     Show this help
+  -v, --version  Print version
+
+Environment:
+  AGOR_DB        Override database path (default: ~/.agor/agor.db)
+
+Examples:
+  agor-board-context agor-bootstrap-project
+  agor-board-context fa1d135e-32e4-ade2-5837-c350f43bb1ce
+  agor-board-context my-project > board-context.md
+EOF
+  exit 0
+}
+
+# ── arg parsing ────────────────────────────────────────────────────────────────
+
+BOARD_REF=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)    usage ;;
+    -v|--version) echo "agor-board-context $VERSION"; exit 0 ;;
+    -*)           die "unknown option: $1" ;;
+    *)            BOARD_REF="$1"; shift ;;
+  esac
+done
+
+[[ -n "$BOARD_REF" ]] || die "board slug or ID required. Run with --help for usage."
+[[ -f "$AGOR_DB" ]]   || die "Agor database not found: $AGOR_DB"
+command -v sqlite3 >/dev/null || die "sqlite3 not found"
+command -v jq      >/dev/null || die "jq not found"
+
+# ── file hash (first 8 hex chars of sha256) ────────────────────────────────────
+
+file_hash() {
+  local f="$1"
+  [[ -f "$f" ]] || { printf ""; return; }
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" 2>/dev/null | cut -c1-8
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$f" 2>/dev/null | cut -c1-8
+  else
+    printf "nohash"
+  fi
+}
+
+# ── common directory prefix from an array of absolute paths ───────────────────
+# Strips down character-by-character, then trims to last /
+
+common_dir_prefix() {
+  local paths=("$@")
+  [[ ${#paths[@]} -eq 0 ]] && { printf ""; return; }
+  local prefix="${paths[0]%/*}"
+  local p
+  for p in "${paths[@]:1}"; do
+    while [[ "${p#$prefix}" == "$p" && -n "$prefix" ]]; do
+      prefix="${prefix%/*}"
+    done
+    [[ -z "$prefix" ]] && { printf "/"; return; }
+  done
+  printf '%s/' "$prefix"
+}
+
+# ── resolve board ──────────────────────────────────────────────────────────────
+
+resolve_board() {
+  local ref="$1" row
+  row=$(sqlite3 -json "$AGOR_DB" "
+    SELECT board_id, name, slug,
+           json_extract(data, '$.description')   AS description,
+           json_extract(data, '$.icon')           AS icon,
+           json_extract(data, '$.custom_context') AS custom_context,
+           json_extract(data, '$.objects')        AS objects
+    FROM boards
+    WHERE (slug = '$ref' OR board_id = '$ref') AND archived = 0
+    LIMIT 1
+  ")
+  [[ -n "$row" && "$row" != "[]" ]] || die "board not found: $ref"
+  echo "$row" | jq '.[0]'
+}
+
+# ── extract zones ──────────────────────────────────────────────────────────────
+
+extract_zones() {
+  local objects_json="$1"
+  [[ -n "$objects_json" && "$objects_json" != "null" ]] || { echo "[]"; return; }
+  echo "$objects_json" | jq '[
+    to_entries[]
+    | select(.value.type == "zone")
+    | (.value.trigger.template // null) as $tmpl
+    | {
+        zone_id:          .key,
+        label:            .value.label,
+        trigger_behavior: (.value.trigger.behavior // null),
+        trigger_agent:    (.value.trigger.agent    // null),
+        trigger_template: $tmpl,
+        trigger_preview: (
+          if $tmpl then
+            ($tmpl | split("\n")) as $lines |
+            ($lines[0] | ltrimstr(" ")) as $first |
+            (if ($first | length) > 80 then $first[:80] else $first end) +
+            (if ($lines | length) > 1 or ($first | length) > 80 then "…" else "" end)
+          else null end
+        ),
+        position: { x: .value.x, y: .value.y }
+      }
+  ] | sort_by(.position.x)'
+}
+
+# ── gather worktrees ───────────────────────────────────────────────────────────
+
+gather_worktrees() {
+  local board_id="$1"
+  sqlite3 -json "$AGOR_DB" "
+    SELECT
+      w.worktree_id,
+      w.name,
+      w.ref,
+      r.repo_id,
+      r.slug                             AS repo_slug,
+      json_extract(r.data,  '$.path')    AS repo_path,
+      json_extract(w.data,  '$.path')    AS worktree_path,
+      json_extract(w.data,  '$.notes')   AS notes,
+      json_extract(bo.data, '$.zone_id') AS zone_id,
+      w.created_at,
+      w.updated_at
+    FROM worktrees w
+    JOIN repos r ON w.repo_id = r.repo_id
+    LEFT JOIN board_objects bo
+           ON bo.worktree_id = w.worktree_id AND bo.board_id = w.board_id
+    WHERE w.board_id = '$board_id' AND w.archived = 0
+    ORDER BY w.created_at
+  "
+}
+
+# ── sessions ───────────────────────────────────────────────────────────────────
+
+gather_sessions() {
+  local wt_id="$1"
+  sqlite3 -json "$AGOR_DB" "
+    SELECT session_id, status, agentic_tool,
+           json_extract(data, '$.title') AS title,
+           parent_session_id,
+           created_at, updated_at
+    FROM sessions
+    WHERE worktree_id = '$wt_id' AND archived = 0
+    ORDER BY created_at
+  "
+}
+
+classify_sessions() {
+  echo "$1" | jq '{
+    total:   length,
+    oldest:  (sort_by(.created_at) | first |
+              { session_id, title, agentic_tool, status, created_at }),
+    latest:  (sort_by(.updated_at) | last  |
+              { session_id, title, agentic_tool, status, updated_at }),
+    by_status: (group_by(.status) | map({ (.[0].status): length }) | add // {}),
+    likely_coordinators: [
+      .[] | select(
+        (.title // "" | test("(?i)coord|orchestrat|bootstrap")) or
+        (.status == "running" and (.updated_at - .created_at > 86400000))
+      ) | { session_id, title, agentic_tool, status }
+    ],
+    long_lived: [
+      .[] | select(.updated_at - .created_at > 86400000)
+      | { session_id, title, agentic_tool, status,
+          duration_hours: ((.updated_at - .created_at) / 3600000 | floor) }
+    ] | sort_by(-.duration_hours)
+  }'
+}
+
+# ── last assistant message tail (messages table) ───────────────────────────────
+
+last_assistant_preview() {
+  local session_id="$1" maxlen="${2:-70}"
+  local tail
+  tail=$(sqlite3 "$AGOR_DB" "
+    SELECT substr(json_extract(data, '$.content[0].text'), -${maxlen})
+    FROM messages
+    WHERE session_id = '${session_id}'
+      AND role = 'assistant'
+      AND json_extract(data, '$.content[0].type') = 'text'
+    ORDER BY created_at DESC
+    LIMIT 1
+  " 2>/dev/null || true)
+  tail=$(printf '%s' "$tail" | tr '\n' ' ' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+  printf '%s' "$tail"
+}
+
+# ── PR detection ───────────────────────────────────────────────────────────────
+
+gather_prs() {
+  local repo_slug="$1" branch="$2" notes="$3"
+  local prs='[]'
+
+  local urls
+  urls=$(printf '%s' "$notes" \
+    | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' \
+    | sort -u 2>/dev/null || true)
+  for url in $urls; do
+    local num="${url##*/pull/}"
+    prs=$(echo "$prs" | jq \
+      --arg u "$url" --arg n "$num" \
+      '. + [{number: ($n | tonumber), url: $u, title: "", state: "linked", source: "notes"}]')
+  done
+
+  # Read from parallel-prefetched cache; fall back to live call if cache not ready
+  local gh_out=""
+  local _cache_key="${repo_slug//\//_}__${branch//\//_}"
+  if [[ -n "${_gh_pr_dir:-}" && -f "${_gh_pr_dir}/${_cache_key}.json" ]]; then
+    gh_out=$(cat "${_gh_pr_dir}/${_cache_key}.json")
+  elif command -v gh >/dev/null 2>&1 && [[ -n "$repo_slug" ]] && [[ -n "$branch" ]]; then
+    gh_out=$(gh pr list \
+      --repo "$repo_slug" --head "$branch" --state open \
+      --json number,title,url 2>/dev/null || true)
+  fi
+  if [[ -n "$gh_out" && "$gh_out" != "[]" && "$gh_out" != "null" ]]; then
+    prs=$(printf '%s\n%s' "$prs" "$gh_out" | jq -s '
+      (.[0] + (.[1] | map(. + {state: "open", source: "gh"})))
+      | unique_by(.url)
+      | sort_by(.number)')
+  fi
+
+  echo "$prs"
+}
+
+# ── project doc / roadmap detection ───────────────────────────────────────────
+# Returns JSON array of {path, hash} objects.
+
+discover_docs() {
+  local wt_path="$1"
+  [[ -n "$wt_path" && -d "$wt_path" ]] || { echo '[]'; return; }
+
+  local docs='[]'
+  local seen=()
+
+  add_doc() {
+    local abs="$1"
+    [[ -f "$abs" ]] || return
+    local p; for p in "${seen[@]+"${seen[@]}"}"; do [[ "$p" == "$abs" ]] && return; done
+    seen+=("$abs")
+    local h; h=$(file_hash "$abs")
+    docs=$(echo "$docs" | jq --arg p "$abs" --arg h "$h" '. + [{path: $p, hash: $h}]')
+  }
+
+  local priority=(
+    roadmap.md ROADMAP.md ROADMAP
+    doc/roadmap.md docs/roadmap.md
+    SPEC.md spec.md
+    api.md doc/api.md
+    doc/bootstrap.md
+  )
+  for rel in "${priority[@]}"; do
+    add_doc "$wt_path/$rel"
+  done
+
+  if [[ -d "$wt_path/doc" ]]; then
+    while IFS= read -r f; do
+      add_doc "$f"
+    done < <(find "$wt_path/doc" -maxdepth 1 -name '*.md' -type f 2>/dev/null | sort)
+  fi
+
+  echo "$docs"
+}
+
+# ── local paths ────────────────────────────────────────────────────────────────
+# Adds claude_md_hash field for deduplication.
+
+discover_local_paths() {
+  local wt_path="$1" result='{}'
+  [[ -n "$wt_path" && -d "$wt_path" ]] || { echo "$result"; return; }
+
+  if [[ -f "$wt_path/CLAUDE.md" ]]; then
+    local h; h=$(file_hash "$wt_path/CLAUDE.md")
+    result=$(echo "$result" | jq \
+      --arg p "$wt_path/CLAUDE.md" --arg h "$h" \
+      '. + {claude_md: $p, claude_md_hash: $h}')
+  fi
+
+  if [[ -d "$wt_path/.claude/skills" ]]; then
+    local n
+    n=$(find "$wt_path/.claude/skills" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+    result=$(echo "$result" | jq \
+      --arg  p "$wt_path/.claude/skills" \
+      --argjson n "$n" \
+      '. + {skills_dir: $p, skills_count: $n}')
+  fi
+
+  if [[ -d "$wt_path/.claude/rules" ]]; then
+    local n rpreview="" rline
+    n=$(find "$wt_path/.claude/rules" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+    # Collect first meaningful line from each rules file, join with " · "
+    while IFS= read -r rf; do
+      rline=$(grep -vE '^[[:space:]]*(#|$)' "$rf" 2>/dev/null | head -1 | sed 's/^[[:space:]]*//' || true)
+      [[ -n "$rline" ]] || continue
+      rpreview="${rpreview:+${rpreview} · }${rline}"
+      [[ ${#rpreview} -ge 80 ]] && break
+    done < <(find "$wt_path/.claude/rules" -maxdepth 1 -type f 2>/dev/null | sort)
+    # Truncate to 80 chars
+    [[ ${#rpreview} -gt 80 ]] && rpreview="${rpreview:0:80}…"
+    result=$(echo "$result" | jq \
+      --arg  p "$wt_path/.claude/rules" \
+      --argjson n "$n" \
+      --arg  rp "$rpreview" \
+      '. + {rules_dir: $p, rules_count: $n, rules_preview: $rp}')
+  fi
+
+  echo "$result"
+}
+
+# ── notes preview ──────────────────────────────────────────────────────────────
+
+notes_preview() {
+  local text="$1" maxlen="${2:-60}" line
+  line=$(printf '%s' "$text" \
+    | grep -v '^[[:space:]]*#' \
+    | grep -m1 '[^[:space:]]' \
+    | sed 's/^[[:space:]]*//' \
+    || true)
+  if [[ -z "$line" ]]; then
+    line=$(printf '%s' "$text" | head -1 | sed 's/^[[:space:]]*//')
+  fi
+  if [[ ${#line} -gt $maxlen ]]; then
+    line="${line:0:$maxlen}…"
+  fi
+  printf '%s' "$line"
+}
+
+# ── main assembly ──────────────────────────────────────────────────────────────
+
+main() {
+  local board_json board_id objects_json zones_json worktrees_raw
+  board_json=$(resolve_board "$BOARD_REF")
+  board_id=$(echo "$board_json"     | jq -r '.board_id')
+  objects_json=$(echo "$board_json" | jq -r '.objects // empty')
+  zones_json=$(extract_zones "$objects_json")
+  worktrees_raw=$(gather_worktrees "$board_id")
+
+  # ── parallel gh PR prefetch (all worktrees in background) ──────────────────
+  if command -v gh >/dev/null 2>&1; then
+    _gh_pr_dir=$(mktemp -d)
+    while IFS= read -r _wt_entry; do
+      local _repo _branch _key
+      _repo=$(printf '%s' "$_wt_entry"   | jq -r '.repo_slug // ""')
+      _branch=$(printf '%s' "$_wt_entry" | jq -r '.ref // ""')
+      [[ -n "$_repo" && -n "$_branch" ]] || continue
+      _key="${_repo//\//_}__${_branch//\//_}"
+      gh pr list --repo "$_repo" --head "$_branch" --state open \
+        --json number,title,url \
+        > "${_gh_pr_dir}/${_key}.json" 2>/dev/null &
+    done < <(echo "$worktrees_raw" | jq -c '.[]')
+    wait  # collect all background gh jobs
+  fi
+
+  local enriched="[]"
+  local wt_ids
+  wt_ids=$(echo "$worktrees_raw" | jq -r '.[].worktree_id')
+
+  for wt_id in $wt_ids; do
+    local wt wt_path zone_id zone_label sessions sessions_summary local_paths prs docs np e
+
+    wt=$(echo "$worktrees_raw" | jq --arg id "$wt_id" '.[] | select(.worktree_id == $id)')
+    wt_path=$(echo "$wt" | jq -r '.worktree_path // empty')
+
+    zone_id=$(echo "$wt" | jq -r '.zone_id // empty')
+    zone_label=""
+    [[ -n "$zone_id" ]] && \
+      zone_label=$(echo "$zones_json" | jq -r --arg z "$zone_id" \
+                   '.[] | select(.zone_id == $z) | .label // ""')
+
+    sessions=$(gather_sessions "$wt_id")
+    if [[ $(echo "$sessions" | jq 'length') -gt 0 ]]; then
+      sessions_summary=$(classify_sessions "$sessions")
+    else
+      sessions_summary='{"total":0,"oldest":null,"latest":null,"by_status":{},"likely_coordinators":[],"long_lived":[]}'
+    fi
+
+    local_paths=$(discover_local_paths "$wt_path")
+
+    local wt_notes wt_repo_slug wt_branch
+    wt_notes=$(echo "$wt"     | jq -r '.notes // ""')
+    wt_repo_slug=$(echo "$wt" | jq -r '.repo_slug // ""')
+    wt_branch=$(echo "$wt"    | jq -r '.ref // ""')
+    prs=$(gather_prs "$wt_repo_slug" "$wt_branch" "$wt_notes")
+    docs=$(discover_docs "$wt_path")
+
+    np=$(notes_preview "$wt_notes" 60)
+
+    e=$(echo "$wt" | jq \
+      --arg  zl "$zone_label" \
+      --arg  np "$np" \
+      --argjson ss "$sessions_summary" \
+      --argjson lp "$local_paths" \
+      --argjson prs "$prs" \
+      --argjson docs "$docs" \
+      '. + {
+        zone_label:    (if $zl == "" then null else $zl end),
+        notes_preview: $np,
+        sessions:      $ss,
+        local_paths:   $lp,
+        prs:           $prs,
+        docs:          $docs
+      } | del(.notes) | del(.repo_path)')
+
+    enriched=$(echo "$enriched" | jq --argjson w "$e" '. + [$w]')
+  done
+
+  local now
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  local ctx
+  ctx=$(jq -n \
+    --arg  v  "$VERSION" \
+    --arg  ts "$now" \
+    --argjson b "$board_json" \
+    --argjson z "$zones_json" \
+    --argjson w "$enriched" \
+    '{
+      meta: { version: $v, generated_at: $ts, generator: "agor-board-context" },
+      board: {
+        board_id:       $b.board_id,
+        name:           $b.name,
+        slug:           $b.slug,
+        description:    ($b.description // null),
+        icon:           ($b.icon // ""),
+        custom_context: ($b.custom_context |
+          if . and . != "" then (fromjson? // .) else null end)
+      },
+      zones:     $z,
+      worktrees: $w,
+      summary: {
+        total_worktrees: ($w | length),
+        total_sessions:  ($w | map(.sessions.total)                  | add // 0),
+        active_sessions: ($w | map(.sessions.by_status.running // 0) | add // 0)
+      }
+    }')
+
+  generate_markdown "$ctx"
+  [[ -n "${_gh_pr_dir:-}" ]] && rm -rf "$_gh_pr_dir"
+}
+
+# ── markdown generator ─────────────────────────────────────────────────────────
+
+generate_markdown() {
+  local ctx="$1"
+
+  # ── compute shared worktree root ─────────────────────────────────────────────
+  local wt_paths_raw wt_root
+  # Collect non-empty worktree paths into a bash array
+  mapfile -t _wt_paths < <(echo "$ctx" | jq -r '[.worktrees[].worktree_path // ""] | map(select(length > 0)) | .[]')
+  if [[ ${#_wt_paths[@]} -gt 0 ]]; then
+    wt_root=$(common_dir_prefix "${_wt_paths[@]}")
+  else
+    wt_root=""
+  fi
+
+  # Helper: strip root prefix; fall back to absolute if not under root
+  rel() {
+    local abs="$1"
+    if [[ -n "$wt_root" && "$abs" == "$wt_root"* ]]; then
+      printf '%s' "${abs#$wt_root}"
+    else
+      printf '%s' "$abs"
+    fi
+  }
+
+  # ── 1. Header ──────────────────────────────────────────────────────────────
+  local board_name board_desc board_icon board_id ts ver
+  local total_wt total_sess active_sess
+  board_name=$(echo "$ctx"  | jq -r '.board.name')
+  board_desc=$(echo "$ctx"  | jq -r '.board.description // "—"')
+  board_icon=$(echo "$ctx"  | jq -r '.board.icon // ""')
+  board_id=$(echo "$ctx"    | jq -r '.board.board_id')
+  ts=$(echo "$ctx"          | jq -r '.meta.generated_at')
+  ver=$(echo "$ctx"         | jq -r '.meta.version')
+  total_wt=$(echo "$ctx"    | jq -r '.summary.total_worktrees')
+  total_sess=$(echo "$ctx"  | jq -r '.summary.total_sessions')
+  active_sess=$(echo "$ctx" | jq -r '.summary.active_sessions')
+
+  printf '# %s %s\n\n' "$board_icon" "$board_name"
+  printf '> %s | agor-board-context v%s  \n' "$ts" "$ver"
+  printf '> %s\n\n' "$board_desc"
+  printf '**%s** worktrees · **%s** sessions · **%s** active\n' \
+         "$total_wt" "$total_sess" "$active_sess"
+  [[ -n "$wt_root" ]] && printf 'Root: `%s`\n' "$wt_root"
+  printf 'Board: `%s`\n\n' "$board_id"
+
+  # ── 2. Zones ───────────────────────────────────────────────────────────────
+  if [[ "$(echo "$ctx" | jq '.zones | length')" -gt 0 ]]; then
+    printf '## Zones\n\n'
+    printf '| Zone | Trigger | Agent | Template preview |\n'
+    printf '|------|---------|-------|------------------|\n'
+    echo "$ctx" | jq -r '.zones[] |
+      "| \(.label) | \(.trigger_behavior // "—") | \(.trigger_agent // "—") | \(.trigger_preview // "—") |"'
+    printf '\n'
+    printf '> full templates: `agor_boards_get(boardId="%s")`\n\n' "$board_id"
+  fi
+
+  # ── 3. Worktrees ───────────────────────────────────────────────────────────
+  printf '## Worktrees\n\n'
+  printf '| Name | Repo | Branch | Zone | Sessions | Latest | Notes | Rules | wt_id |\n'
+  printf '|------|------|--------|------|----------|--------|-------|-------|-------|\n'
+  echo "$ctx" | jq -r '.worktrees[] |
+    (.sessions.latest.title // "—" | gsub("(\\n)+"; " ") | if length > 40 then .[:40] + "…" else . end) as $lt |
+    (.local_paths.rules_preview // "—") as $rp |
+    "| \(.name) | \(.repo_slug) | \(.ref) | \(.zone_label // "—") | \(.sessions.total) | \($lt) (\(.sessions.latest.status // "—")) | \(.notes_preview // "—") | \($rp) | \(.worktree_id) |"'
+  printf '\n'
+  printf '> `agor_worktrees_get(worktreeId="<wt_id>")`\n\n'
+
+  # ── 4. Key Sessions ────────────────────────────────────────────────────────
+  local key_sessions
+  key_sessions=$(echo "$ctx" | jq '[
+    .worktrees[] as $wt |
+    (
+      ($wt.sessions.latest | select(. != null and .status == "running") |
+       . + {_wt: $wt.name, _kind: "running"}),
+      ($wt.sessions.likely_coordinators[] |
+       . + {_wt: $wt.name, _kind: "coordinator"}),
+      ($wt.sessions.long_lived[0:3][] |
+       . + {_wt: $wt.name, _kind: "\(.duration_hours)h"})
+    )
+  ] | unique_by(.session_id) | .[0:8]')
+
+  if [[ "$(echo "$key_sessions" | jq 'length')" -gt 0 ]]; then
+    printf '## Key Sessions\n\n'
+    printf '| Session | Worktree | Status | Kind | Last msg | sess_id |\n'
+    printf '|---------|----------|--------|------|----------|--------|\n'
+    while IFS= read -r sess_json; do
+      local sid s_title s_wt s_status s_kind s_last
+      sid=$(echo "$sess_json"      | jq -r '.session_id')
+      s_title=$(echo "$sess_json"  | jq -r '.title // "(untitled)" | gsub("(\\n)+"; " ") | if length > 40 then .[:40] + "…" else . end')
+      s_wt=$(echo "$sess_json"     | jq -r '._wt')
+      s_status=$(echo "$sess_json" | jq -r '.status')
+      s_kind=$(echo "$sess_json"   | jq -r '._kind')
+      s_last=$(last_assistant_preview "$sid" 55)
+      [[ -n "$s_last" ]] && s_last="…${s_last}"
+      s_last="${s_last//|/∣}"
+      printf '| %s | %s | %s | %s | %s | %s |\n' \
+        "$s_title" "$s_wt" "$s_status" "$s_kind" "$s_last" "$sid"
+    done < <(echo "$key_sessions" | jq -c '.[]')
+    printf '\n'
+    printf '> `agor_sessions_get(sessionId="<sess_id>")` ·'
+    printf ' messages: `agor_messages_list(sessionId="<sess_id>", contentMode="full", includeToolCalls=false, limit=50)` ·'
+    printf ' tasks: `agor_tasks_list(sessionId="<sess_id>", limit=20)`\n\n'
+  fi
+
+  # ── 5. Pull Requests ───────────────────────────────────────────────────────
+  local all_prs
+  all_prs=$(echo "$ctx" | jq '[
+    .worktrees[] as $wt |
+    $wt.prs[] | . + {_wt: $wt.name}
+  ]')
+
+  if [[ "$(echo "$all_prs" | jq 'length')" -gt 0 ]]; then
+    printf '## Pull Requests\n\n'
+    printf '| Worktree | PR | Title | State |\n'
+    printf '|----------|----|-------|-------|\n'
+    echo "$all_prs" | jq -r '.[] |
+      (.title // "" | if length > 0 then . else "—" end
+        | gsub("(\\n)+"; " ") | if length > 50 then .[:50] + "…" else . end) as $t |
+      "| \(._wt) | \(.url) | \($t) | \(.state) |"'
+    printf '\n'
+  fi
+
+  # ── 6. Project Docs ────────────────────────────────────────────────────────
+  # Collect all docs with hash + worktree, then deduplicate by hash
+  local all_docs_raw all_docs_deduped
+  all_docs_raw=$(echo "$ctx" | jq '[
+    .worktrees[] as $wt |
+    $wt.docs[] | . + {_wt: $wt.name}
+  ]')
+
+  if [[ "$(echo "$all_docs_raw" | jq 'length')" -gt 0 ]]; then
+    # Group by hash: unique file content, list of worktrees that have it
+    all_docs_deduped=$(echo "$all_docs_raw" | jq '
+      group_by(.hash) | map({
+        hash: .[0].hash,
+        path: .[0].path,
+        wts:  ([.[]._wt] | unique | sort)
+      })')
+
+    printf '## Project Docs\n\n'
+    printf '| Hash | Path | Worktrees |\n'
+    printf '|------|------|----------|\n'
+    local wt_root_local="$wt_root"
+    while IFS= read -r doc_json; do
+      local d_hash d_path d_wts d_rel
+      d_hash=$(echo "$doc_json" | jq -r '.hash')
+      d_path=$(echo "$doc_json" | jq -r '.path')
+      d_wts=$(echo "$doc_json"  | jq -r '.wts | join(", ")')
+      d_rel=$(rel "$d_path")
+      printf '| `%s` | `%s` | %s |\n' "$d_hash" "$d_rel" "$d_wts"
+    done < <(echo "$all_docs_deduped" | jq -c '.[]')
+    printf '\n'
+  fi
+
+  # ── 7. Local Context ───────────────────────────────────────────────────────
+  local has_local
+  has_local=$(echo "$ctx" | jq '[
+    .worktrees[] | select(
+      (.local_paths | has("claude_md")) or
+      (.local_paths | has("skills_dir")) or
+      (.local_paths | has("rules_dir"))
+    )
+  ] | length')
+
+  if [[ "$has_local" -gt 0 ]]; then
+    printf '## Local Context\n\n'
+    printf '| Worktree | CLAUDE.md | Skills | Rules |\n'
+    printf '|----------|-----------|--------|-------|\n'
+
+    # Track seen CLAUDE.md hashes for deduplication
+    declare -A _seen_md_hash=()
+
+    while IFS= read -r wt_json; do
+      local wt_name md_hash md_cell skills_cell rules_cell
+      wt_name=$(echo "$wt_json" | jq -r '.name')
+
+      # CLAUDE.md cell: hash + dedup marker
+      md_hash=$(echo "$wt_json" | jq -r '.local_paths.claude_md_hash // ""')
+      if [[ -z "$md_hash" ]]; then
+        md_cell="—"
+      elif [[ -n "${_seen_md_hash[$md_hash]+_}" ]]; then
+        md_cell="\`=${md_hash}\` (=${_seen_md_hash[$md_hash]})"
+      else
+        _seen_md_hash["$md_hash"]="$wt_name"
+        md_cell="\`${md_hash}\`"
+      fi
+
+      # Skills cell: relative path + count
+      local sd sc
+      sd=$(echo "$wt_json" | jq -r '.local_paths.skills_dir // ""')
+      sc=$(echo "$wt_json" | jq -r '.local_paths.skills_count // 0')
+      if [[ -n "$sd" ]]; then
+        skills_cell="\`$(rel "$sd")\` (${sc})"
+      else
+        skills_cell="—"
+      fi
+
+      # Rules cell: relative path + count
+      local rd rc
+      rd=$(echo "$wt_json" | jq -r '.local_paths.rules_dir // ""')
+      rc=$(echo "$wt_json" | jq -r '.local_paths.rules_count // 0')
+      if [[ -n "$rd" ]]; then
+        rules_cell="\`$(rel "$rd")\` (${rc})"
+      else
+        rules_cell="—"
+      fi
+
+      printf '| %s | %s | %s | %s |\n' "$wt_name" "$md_cell" "$skills_cell" "$rules_cell"
+    done < <(echo "$ctx" | jq -c '.worktrees[] | select(
+      (.local_paths | has("claude_md")) or
+      (.local_paths | has("skills_dir")) or
+      (.local_paths | has("rules_dir"))
+    )')
+
+    unset _seen_md_hash
+    printf '\n'
+  fi
+}
+
+main

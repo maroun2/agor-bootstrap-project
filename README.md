@@ -235,6 +235,83 @@ The coordinator handles the full bootstrap in order:
 | 3 | `create-tests.md` | Test agent setup |
 | 4 | `create-phase1.md` | Phase 1 task worktrees |
 
+## Agor Skills
+
+Reusable skills bundled in `.claude/skills/`. These are automatically discovered by Claude Code sessions running in any worktree of this repo.
+
+| Skill | Description |
+|-------|-------------|
+| [`board-context`](.claude/skills/board-context/SKILL.md) | Generate a deterministic Markdown board context snapshot with MCP drill-down pointers |
+| [`agor-bg`](.claude/skills/agor-bg/SKILL.md) | Run long-running commands in background with session notification |
+| [`agor-board-setup`](.claude/skills/agor-board-setup/SKILL.md) | Set up a board with workflow zones (Plan, In Progress, Review, Test, Done) |
+| [`agor-mcp-add`](.claude/skills/agor-mcp-add/SKILL.md) | Add MCP servers to Agor's database configuration |
+| [`agor-session-chown`](.claude/skills/agor-session-chown/SKILL.md) | Transfer session ownership to a different user |
+
+## agor-board-context CLI
+
+Deterministic Markdown board context snapshot tool. Queries `~/.agor/agor.db` directly — no MCP, no LLM, no network calls.
+
+Lives in `.claude/skills/board-context/` following the standard Agor skill layout (`SKILL.md` + `scripts/`). Top-level `agor-board-context` symlink provided for direct CLI use. Legacy `board-context` wrapper included for backward compatibility.
+
+### Requirements
+
+- `sqlite3`
+- `jq`
+- Agor installed (`~/.agor/agor.db` exists)
+
+### Usage
+
+```bash
+# Print to stdout
+./agor-board-context <board-slug-or-id>
+
+# Redirect to file
+./agor-board-context my-project > board-context.md
+
+# By board UUID
+./agor-board-context fa1d135e-32e4-ade2-5837-c350f43bb1ce
+
+# Legacy name still works
+./board-context my-project
+```
+
+### What it produces
+
+Markdown to stdout — pipe or redirect as needed. Designed to load into an agent session as starter context.
+
+| Section | Content |
+|---------|---------|
+| Board header | Name, description, counts, shared worktree root, board ID |
+| Zones | Trigger behavior, agent, template first-line preview with `…` |
+| Worktrees | Name, repo, branch, zone, sessions, latest, notes preview, rules preview, `wt_id` |
+| Key sessions | Running + long-lived (capped at 8), with last-message tail and `sess_id` |
+| Pull Requests | PRs found in worktree notes (regex) or open via `gh pr list` |
+| Project Docs | Planning/roadmap files deduplicated by hash, relative paths |
+| Local Context | CLAUDE.md hash, skills path+count, rules path+count per worktree |
+
+Tool-call IDs (`wt_id`, `sess_id`, board ID) appear inline on every row. Each section ends with a compact `>` note showing the MCP call template — no detached drill-down appendix.
+
+### Options
+
+| Flag / Env | Description |
+|------------|-------------|
+| `AGOR_DB` | Override database path (default: `~/.agor/agor.db`) |
+
+### File layout
+
+```
+agor-board-context          → symlink to .claude/skills/board-context/scripts/agor-board-context
+board-context               → backward-compat wrapper (execs agor-board-context)
+.claude/skills/board-context/
+├── SKILL.md                  Skill metadata + docs (frontmatter with triggers)
+└── scripts/
+    └── agor-board-context    Canonical script
+```
+
+### Example
+
+See `examples/board-context-example.md` for a sanitized sample output.
+
 ## Documentation
 
 | File | Description |

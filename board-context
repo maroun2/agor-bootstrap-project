@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Backward-compatibility wrapper. Canonical command: agor-board-context
+# See .claude/skills/board-context/SKILL.md for docs.
+exec "$(dirname "$0")/.claude/skills/board-context/scripts/agor-board-context" "$@"
