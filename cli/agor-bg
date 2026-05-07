@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Agor background runner — run a command in background (nohup),
+# then notify an Agor session when it finishes.
+
+usage() {
+  cat <<'EOF'
+Usage: agor-bg <session-id> <command> [args...]
+
+Run a command in the background (via nohup) and notify an Agor session
+when it finishes. The notification includes exit code and last 20 lines of output.
+
+Arguments:
+  session-id    Agor session ID to notify on completion
+  command       The command to run (with any arguments)
+
+Output:
+  Logs are written to /tmp/agor-bg-<pid>.log
+  A wrapper log is at /tmp/agor-bg-<pid>-wrapper.log
+
+Environment:
+  AGOR_DAEMON_URL   Daemon URL (default: http://localhost:3031)
+  AGOR_TOKEN        JWT auth token (has a built-in default for local use)
+  AGOR_BG_LOGDIR    Log directory (default: /tmp)
+
+Examples:
+  # Run trading bot, notify this session when done
+  agor-bg 278c8b53 .venv/bin/python3 -m live.runner --auto
+
+  # Run tests in background
+  agor-bg 278c8b53 make test
+
+  # Run any long command
+  agor-bg 278c8b53 sleep 60
+EOF
+  exit 1
+}
+
+if [[ $# -lt 2 ]]; then
+  usage
+fi
+
+SESSION_ID="$1"
+shift
+COMMAND=("$@")
+COMMAND_STR="${COMMAND[*]}"
+
+LOGDIR="${AGOR_BG_LOGDIR:-/tmp}"
+TIMESTAMP=$(date +%s)
+LOGFILE="${LOGDIR}/agor-bg-${TIMESTAMP}.log"
+WRAPPER_LOG="${LOGDIR}/agor-bg-${TIMESTAMP}-wrapper.log"
+SCRIPTFILE="${LOGDIR}/agor-bg-${TIMESTAMP}.sh"
+
+# Find agor-prompt (same directory as this script)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AGOR_PROMPT="${SCRIPT_DIR}/agor-prompt"
+
+if [[ ! -x "$AGOR_PROMPT" ]]; then
+  echo "ERROR: agor-prompt not found at ${AGOR_PROMPT}" >&2
+  exit 1
+fi
+
+# Export env vars so the nohup subshell inherits them
+export AGOR_DAEMON_URL="${AGOR_DAEMON_URL:-http://localhost:3031}"
+export AGOR_TOKEN="${AGOR_TOKEN:-YOUR_AGOR_TOKEN_HERE}"
+
+# Build properly quoted command string for the wrapper script
+QUOTED_CMD=$(printf '%q ' "${COMMAND[@]}")
+
+# Write a wrapper script to avoid escaping issues with bash -c
+cat > "$SCRIPTFILE" <<'WRAPPER_EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+
+# Run the command
+eval "$AGOR_BG_CMD" > "$AGOR_BG_LOGFILE" 2>&1
+EXIT_CODE=$?
+
+# Get last 20 lines for the notification
+TAIL=$(tail -20 "$AGOR_BG_LOGFILE" 2>/dev/null | head -c 2000 || echo "(no output)")
+
+# Notify the session
+"$AGOR_BG_PROMPT" "$AGOR_BG_SESSION" "Background command finished.
+Command: ${AGOR_BG_CMDSTR}
+Exit code: ${EXIT_CODE}
+Log: ${AGOR_BG_LOGFILE}
+
+Last 20 lines:
+${TAIL}"
+
+# Clean up the wrapper script
+rm -f "$AGOR_BG_SCRIPT"
+WRAPPER_EOF
+chmod +x "$SCRIPTFILE"
+
+# Pass everything via env vars — no escaping issues
+AGOR_BG_CMD="$QUOTED_CMD" \
+AGOR_BG_LOGFILE="$LOGFILE" \
+AGOR_BG_SESSION="$SESSION_ID" \
+AGOR_BG_PROMPT="$AGOR_PROMPT" \
+AGOR_BG_CMDSTR="$COMMAND_STR" \
+AGOR_BG_SCRIPT="$SCRIPTFILE" \
+nohup bash "$SCRIPTFILE" > "$WRAPPER_LOG" 2>&1 &
+
+BG_PID=$!
+
+echo "Background task started"
+echo "  PID:         ${BG_PID}"
+echo "  Command:     ${COMMAND_STR}"
+echo "  Log:         ${LOGFILE}"
+echo "  Wrapper log: ${WRAPPER_LOG}"
+echo "  Session:     ${SESSION_ID} (will be notified on completion)"
+echo ""
+echo "Check status:  ps -p ${BG_PID} -o pid,stat,etime,cmd"
+echo "Kill:          kill ${BG_PID}"
+echo "Read log:      tail -f ${LOGFILE}"
