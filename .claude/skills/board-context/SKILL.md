@@ -7,14 +7,14 @@ triggers:
   - agor board context
   - board snapshot
   - board summary
-  - user wants to work on a project
-  - user wants to start or continue work on a board
-  - user wants to coordinate or orchestrate a project
-  - user asks what is the state of a project
-  - user does not know which session to talk to
-  - user is not sure what is happening on a board
-  - user wants to pick up where they left off on a project
-  - general orientation before starting work on any Agor project
+  - work on a project or board
+  - start or continue work on a project
+  - coordinate or orchestrate a project
+  - what is the state of a project
+  - which session to talk to
+  - what is happening on a board
+  - pick up where left off on a project
+  - orient before starting work on an Agor project
 argument-hint: "<board-slug-or-id>"
 ---
 
@@ -24,16 +24,6 @@ Generate a compact Markdown snapshot of an Agor board for use as starter
 context in a new session. Output goes to stdout — pipe or redirect as needed.
 Queries `~/.agor/agor.db` directly — no MCP, no LLM, no network calls (PR
 detection via `gh` is best-effort and optional).
-
-## When to use
-
-Run this skill **before starting or resuming any project work** on an Agor board:
-
-- You (or the user) don't know which session to continue in
-- You need to orient yourself on what worktrees exist and their current state
-- User says "let's work on X" or "continue on X" and you don't have context yet
-- You need to figure out what's running, what's idle, what's in which zone
-- Coordinator session starting up and needs a full picture before acting
 
 ## Usage
 
