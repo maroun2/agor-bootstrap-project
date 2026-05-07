@@ -5,16 +5,16 @@ description: Run long-running commands in the background and get notified when t
 
 # agor-bg — Background Tasks with Session Notification
 
-Two CLI tools at `~/.local/bin/` for running background tasks and notifying Agor sessions.
+Two CLI scripts in `.claude/skills/agor-bg/scripts/` for running background tasks and notifying Agor sessions.
 
-## Tools
+## Scripts
 
 ### `agor-bg` — Run command in background, notify on completion
 
 Runs a command via `nohup` in the background. When the command finishes, it automatically sends a prompt to the specified Agor session with the exit code and last 20 lines of output.
 
 ```bash
-agor-bg <session-id> <command> [args...]
+.claude/skills/agor-bg/scripts/agor-bg <session-id> <command> [args...]
 ```
 
 **Examples:**
@@ -36,7 +36,7 @@ agor-bg 278c8b53 sleep 300
 Sends a prompt to an Agor session via the daemon REST API (`POST /sessions/:id/prompt`). Works whether the target session is idle (executes immediately) or busy (gets queued).
 
 ```bash
-agor-prompt <session-id> <prompt>
+.claude/skills/agor-bg/scripts/agor-prompt <session-id> <prompt>
 ```
 
 **Examples:**
@@ -51,10 +51,8 @@ agor-prompt 278c8b53 "Deploy is done, verify staging"
 To find the current session ID, use the `agor_sessions_get_current` MCP tool, then:
 
 ```bash
-agor-bg SESSION_ID command args...
+.claude/skills/agor-bg/scripts/agor-bg SESSION_ID command args...
 ```
-
-**NOTE:** `~/.local/bin` must be on PATH. It is added via `~/.local/bin/env` which is sourced by `.profile` and `.zshrc`, but may not be present in sudo-spawned shells. In that case use full path: `~/.local/bin/agor-bg`.
 
 ## Environment Variables
 
